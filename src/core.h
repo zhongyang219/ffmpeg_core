@@ -5,9 +5,7 @@
 extern "C" {
 #endif
 #include "../ffmpeg_core.h"
-#ifndef FFMPEGCORE_MSVC_PROJEDT
 #include "ffmpeg_core_config.h"
-#endif
 #include "libavformat/avformat.h"
 #include "libavcodec/avcodec.h"
 #include "libavdevice/avdevice.h"

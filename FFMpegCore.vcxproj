@@ -63,6 +63,7 @@
     <ClCompile Include="src\output.c" />
     <ClCompile Include="src\speed.c" />
     <ClCompile Include="src\volume.c" />
+    <ClCompile Include="src\wasapi.cpp" />
     <ClCompile Include="utils\c_linked_list.cpp" />
   </ItemGroup>
   <ItemGroup>

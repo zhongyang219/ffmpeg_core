@@ -149,6 +149,9 @@
     <ClCompile Include="src\cda.c">
       <Filter>源文件</Filter>
     </ClCompile>
+    <ClCompile Include="src\wasapi.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="ffmpeg_core.rc">
