@@ -34,6 +34,23 @@ extern "C" {
 
 #define FFT_SAMPLE 1024
 
+#if LIBAVCODEC_VERSION_MAJOR < 59 || LIBAVCODEC_VERSION_MINOR < 24 || LIBAVCODEC_VERSION_MICRO < 100
+#define OLD_CHANNEL_LAYOUT 1
+#else
+#define NEW_CHANNEL_LAYOUT 1
+#endif
+
+#if defined(__ICL) || defined (__INTEL_COMPILER)
+#define DISABLE_DEPRECATION_WARNINGS __pragma(warning(push)) __pragma(warning(disable:1478))
+#define ENABLE_DEPRECATION_WARNINGS  __pragma(warning(pop))
+#elif defined(_MSC_VER)
+#define DISABLE_DEPRECATION_WARNINGS __pragma(warning(push)) __pragma(warning(disable:4996))
+#define ENABLE_DEPRECATION_WARNINGS  __pragma(warning(pop))
+#else
+#define DISABLE_DEPRECATION_WARNINGS _Pragma("GCC diagnostic push") _Pragma("GCC diagnostic ignored \"-Wdeprecated-declarations\"")
+#define ENABLE_DEPRECATION_WARNINGS  _Pragma("GCC diagnostic pop")
+#endif
+
 typedef struct CDAData {
 /// version of the CD format. In May 2006, always equal to 1.
 uint16_t cd_format_version;
@@ -57,6 +74,7 @@ struct EqualizerChannels* next;
 } EqualizerChannels;
 #if HAVE_WASAPI
 typedef struct WASAPIHandle WASAPIHandle;
+typedef struct PositionDataList PositionDataList;
 #endif
 typedef struct MusicHandle {
 /// Demux 用
@@ -118,8 +136,13 @@ AVFilterContext* filter_out;
 c_linked_list* filters;
 /// CDA 文件信息
 CDAData* cda;
+#if OLD_CHANNEL_LAYOUT
 /// 输出时的声道布局
 uint64_t output_channel_layout;
+#else
+/// 输出时的声道布局
+AVChannelLayout output_channel_layout;
+#endif
 /// 播放地址
 char* url;
 /// 解析后的播放地址
@@ -132,6 +155,12 @@ int64_t last_pkt_pts;
 int filters_buffer_offset;
 #if HAVE_WASAPI
 WASAPIHandle* wasapi;
+/// 存储WASAPI缓冲区信息
+PositionDataList* position_data;
+/// 用来确保WASAPI缓冲区信同时被读取、修改以及确保WASAPI存在
+HANDLE mutex3;
+/// 最近一次尝试重新初始化WASAPI时间
+FILETIME wasapi_last_tried;
 #endif
 /// SDL是否被初始化
 unsigned char sdl_initialized : 1;
@@ -167,6 +196,10 @@ unsigned char is_wait_filters : 1;
 unsigned char is_use_wasapi : 1;
 /// WASAPI是否被初始化
 unsigned char wasapi_initialized : 1;
+/// 当前handle是否启用独占模式
+unsigned char is_exclusive: 1;
+/// 需要重新初始化WASAPI
+unsigned char need_reinit_wasapi: 1;
 #endif
 } MusicHandle;
 typedef struct MusicInfoHandle {
@@ -193,9 +226,24 @@ unsigned char use_wasapi : 1;
 /// 是否启用独占模式
 unsigned char enable_exclusive : 1;
 #endif
+/// 最大等待时间（单位ms），seek等操作最长等待完成时间
+int max_wait_time;
+#if HAVE_WASAPI
+/// WASAPI 独占模式最小缓冲区大小（单位：ms）
+int wasapi_min_buffer_time;
+#endif
+/// 混响强度
+float reverb_mix;
+/// 混响持续时间
+float reverb_delay;
+/// 混响类型
+int reverb_type;
 } FfmpegCoreSettings;
 #if __cplusplus
 }
 std::wstring get_metadata_str(AVDictionary* dict, const char* key, int flags);
+inline enum AVRounding operator|(enum AVRounding a, enum AVRounding b) {
+    return static_cast<enum AVRounding>(static_cast<int>(a) | static_cast<int>(b));
+}
 #endif
 #endif

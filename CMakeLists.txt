@@ -51,9 +51,16 @@ src/equalizer_settings.h
 src/equalizer_settings.cpp
 src/equalizer.h
 src/equalizer.c
+src/ch_layout.h
+src/ch_layout.c
+src/reverb.h
+src/reverb.c
+src/linked_list/float_linked_list.h
+src/linked_list/float_linked_list.cpp
 "${CMAKE_CURRENT_BINARY_DIR}/ffmpeg_core.rc"
 "${CMAKE_CURRENT_BINARY_DIR}/ffmpeg_core_version.h"
 "${CMAKE_CURRENT_BINARY_DIR}/ffmpeg_core_config.h"
+.editorconfig
 )
 
 if (ENABLE_WASAPI)
@@ -61,7 +68,14 @@ if (ENABLE_WASAPI)
 endif()
 
 if (HAVE_WASAPI)
-    list(APPEND CORE_FILES src/wasapi.h src/wasapi.cpp)
+    list(APPEND CORE_FILES
+    src/wasapi.h
+    src/wasapi.cpp
+    src/linked_list/position_data_linked_list.h
+    src/linked_list/position_data_linked_list.cpp
+    src/position_data.h
+    src/position_data.c
+    )
 endif()
 configure_file("${CMAKE_CURRENT_SOURCE_DIR}/ffmpeg_core_config.h.in" "${CMAKE_CURRENT_BINARY_DIR}/ffmpeg_core_config.h")
 

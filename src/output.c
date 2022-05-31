@@ -1,6 +1,13 @@
 #include "output.h"
 
 #include "speed.h"
+#include "ch_layout.h"
+#if HAVE_WASAPI
+#include "position_data.h"
+#define ADD_POSITION_DATA(len, have_data) if (handle->is_use_wasapi && wasapi_get_object) add_data_to_position_data(handle, len, have_data);
+#else
+#define ADD_POSITION_DATA(len, have_data)
+#endif
 
 int init_output(MusicHandle* handle, const char* device) {
     if (!handle) return FFMPEG_CORE_ERR_NULLPTR;
@@ -18,7 +25,7 @@ int init_output(MusicHandle* handle, const char* device) {
         av_log(NULL, AV_LOG_FATAL, "Unknown sample format: %s (%i)\n", tmp ? tmp : "", handle->decoder->sample_fmt);
         return FFMPEG_CORE_ERR_UNKNOWN_SAMPLE_FMT;
     }
-    sdl_spec.channels = handle->decoder->channels;
+    sdl_spec.channels = GET_AV_CODEC_CHANNELS(handle->decoder);
     sdl_spec.samples = handle->decoder->sample_rate / 100;
     sdl_spec.callback = SDL_callback;
     sdl_spec.userdata = handle;
@@ -29,17 +36,26 @@ int init_output(MusicHandle* handle, const char* device) {
         return FFMPEG_CORE_ERR_SDL;
     }
     enum AVSampleFormat target_format = convert_to_sdl_supported_format(handle->decoder->sample_fmt);
+    int re = 0;
+#if NEW_CHANNEL_LAYOUT
+    if (re = get_sdl_channel_layout(handle->decoder->ch_layout.nb_channels, &handle->output_channel_layout)) {
+        return re;
+    }
+    if (re = swr_alloc_set_opts2(&handle->swrac, &handle->output_channel_layout, target_format, handle->sdl_spec.freq, &handle->decoder->ch_layout, handle->decoder->sample_fmt, handle->decoder->sample_rate, 0, NULL)) {
+        return re;
+    }
+#else
     handle->output_channel_layout = get_sdl_channel_layout(handle->decoder->channels);
     handle->swrac = swr_alloc_set_opts(NULL, handle->output_channel_layout, target_format, handle->sdl_spec.freq, handle->decoder->channel_layout, handle->decoder->sample_fmt, handle->decoder->sample_rate, 0, NULL);
+#endif
     if (!handle->swrac) {
         av_log(NULL, AV_LOG_FATAL, "Failed to allocate resample context.\n");
         return FFMPEG_CORE_ERR_OOM;
     }
-    int re = 0;
     if ((re = swr_init(handle->swrac)) < 0) {
         return re;
     }
-    if (!(handle->buffer = av_audio_fifo_alloc(target_format, handle->decoder->channels, 1))) {
+    if (!(handle->buffer = av_audio_fifo_alloc(target_format, GET_AV_CODEC_CHANNELS(handle->decoder), 1))) {
         av_log(NULL, AV_LOG_FATAL, "Failed to allocate buffer.\n");
         return FFMPEG_CORE_ERR_OOM;
     }
@@ -85,10 +101,24 @@ SDL_AudioFormat convert_to_sdl_format(enum AVSampleFormat fmt) {
 
 void SDL_callback(void* userdata, uint8_t* stream, int len) {
     MusicHandle* handle = (MusicHandle*)userdata;
+#if HAVE_WASAPI
+    /// 是否获取到了Mutex3所有权
+    char wasapi_get_object = 0;
+    if (handle->is_use_wasapi) {
+        DWORD tmp = WaitForSingleObject(handle->mutex3, 1);
+        if (tmp == WAIT_OBJECT_0) {
+            wasapi_get_object = 1;
+        }
+    }
+#endif
     DWORD re = WaitForSingleObject(handle->mutex, 5);
     if (re != WAIT_OBJECT_0) {
         // 无法获取Mutex所有权，填充空白数据
         memset(stream, 0, len);
+        ADD_POSITION_DATA(len, 0)
+#if HAVE_WASAPI
+        if (wasapi_get_object) ReleaseMutex(handle->mutex3);
+#endif
         return;
     }
     int samples_need = len / handle->target_format_pbytes / handle->sdl_spec.channels;
@@ -96,6 +126,7 @@ void SDL_callback(void* userdata, uint8_t* stream, int len) {
     if (av_audio_fifo_size(handle->buffer) == 0) {
         // 缓冲区没有数据，填充空白数据
         memset(stream, 0, len);
+        ADD_POSITION_DATA(len, 0)
     } else if (!handle->graph) {
         int writed = av_audio_fifo_read(handle->buffer, (void**)&stream, samples_need);
         if (writed > 0) {
@@ -106,9 +137,15 @@ void SDL_callback(void* userdata, uint8_t* stream, int len) {
         if (writed < 0) {
             // 读取发生错误，填充空白数据
             memset(stream, 0, len);
+            ADD_POSITION_DATA(len, 0)
         } else if (writed < samples_need) {
+            size_t len = ((size_t)samples_need - writed) * handle->target_format_pbytes, alen = (size_t)writed * handle->target_format_pbytes;
             // 不足的区域用空白数据填充
-            memset(stream + (size_t)writed * handle->target_format_pbytes, 0, (((size_t)samples_need - writed) * handle->target_format_pbytes));
+            memset(stream + alen, 0, len);
+            ADD_POSITION_DATA(alen, 1)
+            ADD_POSITION_DATA(len, 0)
+        } else {
+            ADD_POSITION_DATA(len, 1)
         }
     } else if (handle->is_easy_filters) {
         AVFrame* in = av_frame_alloc(), * out = av_frame_alloc();
@@ -116,16 +153,26 @@ void SDL_callback(void* userdata, uint8_t* stream, int len) {
         int samples_need_in = 0;
         if (!in || !out) {
             memset(stream, 0, len);
+            ADD_POSITION_DATA(len, 0)
             goto end;
         }
         samples_need_in = samples_need * get_speed(handle->s->speed) / 1000;
+#if NEW_CHANNEL_LAYOUT
+        if (av_channel_layout_copy(&in->ch_layout, &handle->output_channel_layout) < 0) {
+            memset(stream, 0, len);
+            ADD_POSITION_DATA(len, 0)
+            goto end;
+        }
+#else
         in->channels = handle->sdl_spec.channels;
         in->channel_layout = handle->output_channel_layout;
+#endif
         in->format = handle->target_format;
         in->sample_rate = handle->sdl_spec.freq;
         in->nb_samples = samples_need_in;
         if (av_frame_get_buffer(in, 0) < 0) {
             memset(stream, 0, len);
+            ADD_POSITION_DATA(len, 0)
             goto end;
         }
         // 从缓冲区读取数据
@@ -137,25 +184,31 @@ void SDL_callback(void* userdata, uint8_t* stream, int len) {
         }
         if (writed < 0) {
             memset(stream, 0, len);
+            ADD_POSITION_DATA(len, 0)
             goto end;
         }
         in->nb_samples = writed;
         // 喂给 filters 数据
         if (av_buffersrc_add_frame(handle->filter_inp, in) < 0) {
             memset(stream, 0, len);
+            ADD_POSITION_DATA(len, 0)
             goto end;
         }
         // 从 filters 拿回数据
         if (av_buffersink_get_frame(handle->filter_out, out) < 0) {
             memset(stream, 0, len);
+            ADD_POSITION_DATA(len, 0)
             goto end;
         }
         if (out->nb_samples >= samples_need) {
             memcpy(stream, out->data[0], len);
+            ADD_POSITION_DATA(len, 1)
         } else {
             size_t le = (size_t)out->nb_samples * handle->target_format_pbytes * handle->sdl_spec.channels;
             memcpy(stream, out->data[0], le);
+            ADD_POSITION_DATA(le, 1)
             memset(stream, 0, len - le);
+            ADD_POSITION_DATA(len - le, 0)
         }
 end:
         if (in) av_frame_free(&in);
@@ -174,16 +227,54 @@ end:
         if (writed < 0) {
             // 读取发生错误，填充空白数据
             memset(stream, 0, len);
+            ADD_POSITION_DATA(len, 0)
         } else if (writed < samples_need) {
+            size_t alen = (size_t)writed * handle->target_format_pbytes, len = ((size_t)samples_need - writed) * handle->target_format_pbytes;
             // 不足的区域用空白数据填充
-            memset(stream + (size_t)writed * handle->target_format_pbytes, 0, (((size_t)samples_need - writed) * handle->target_format_pbytes));
+            memset(stream + alen, 0, len);
+            ADD_POSITION_DATA(alen, 1)
+            ADD_POSITION_DATA(len, 0)
+        } else {
+            ADD_POSITION_DATA(len, 1)
         }
     } else {
         memset(stream, 0, len);
+        ADD_POSITION_DATA(len, 0)
     }
     ReleaseMutex(handle->mutex);
+#if HAVE_WASAPI
+    if (wasapi_get_object) {
+        ReleaseMutex(handle->mutex3);
+    }
+#endif
 }
 
+#if NEW_CHANNEL_LAYOUT
+int get_sdl_channel_layout(int channels, AVChannelLayout* channel_layout) {
+    if (!channel_layout) return FFMPEG_CORE_ERR_NULLPTR;
+    switch (channels) {
+        case 2:
+            return av_channel_layout_from_string(channel_layout, "FL+FR");
+        case 3:
+            return av_channel_layout_from_string(channel_layout, "FL+FR+LFE");
+        case 4:
+            return av_channel_layout_from_string(channel_layout, "FL+FR+BL+BR");
+        case 5:
+            return av_channel_layout_from_string(channel_layout, "FL+FR+FC+BL+BR");
+        case 6:
+            return av_channel_layout_from_string(channel_layout, "FL+FR+FC+LFE+SL+SR");
+        case 7:
+            return av_channel_layout_from_string(channel_layout, "FL+FR+FC+LFE+BC+SL+SR");
+        case 8:
+            return av_channel_layout_from_string(channel_layout, "FL+FR+FC+LFE+BL+BR+SL+SR");
+        default:
+            av_channel_layout_default(channel_layout, channels);
+            return FFMPEG_CORE_ERR_OK;
+    }
+}
+#endif
+
+#if OLD_CHANNEL_LAYOUT
 uint64_t get_sdl_channel_layout(int channels) {
     switch (channels) {
         case 2:
@@ -204,3 +295,4 @@ uint64_t get_sdl_channel_layout(int channels) {
             return av_get_default_channel_layout(channels);
     }
 }
+#endif
