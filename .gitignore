@@ -291,4 +291,4 @@ __pycache__/
 *.sf2
 
 build/
-
+.vscode/

@@ -17,9 +17,11 @@
 #include "linked_list.h"
 #include "cstr_util.h"
 #include "ffmpeg_core_version.h"
+#include "ch_layout.h"
 
 #if HAVE_WASAPI
 #include "wasapi.h"
+#include "position_data.h"
 #endif
 
 #define CODEPAGE_SIZE 3
@@ -28,6 +30,8 @@
 #ifndef min
 #define min(a,b) (((a) < (b)) ? (a) : (b))
 #endif
+
+#define ft2ts(t) (((uint64_t)t.dwHighDateTime << 32) | (uint64_t)t.dwLowDateTime)
 
 template <typename T>
 void tfree(T* data) {
@@ -76,10 +80,16 @@ void free_music_handle(MusicHandle* handle) {
     if (handle->sdl_initialized) {
         SDL_QuitSubSystem(SDL_INIT_AUDIO);
     }
+#if NEW_CHANNEL_LAYOUT
+    if (handle->output_channel_layout.nb_channels != 0) {
+        av_channel_layout_uninit(&handle->output_channel_layout);
+    }
+#endif
 #if HAVE_WASAPI
     if (handle->wasapi_initialized) {
         uninit_WASAPI();
     }
+    position_data_list_clear(&handle->position_data);
 #endif
     if (handle->s && handle->settings_is_alloc) {
         free_ffmpeg_core_settings(handle->s);
@@ -87,6 +97,11 @@ void free_music_handle(MusicHandle* handle) {
     if (handle->cda) free(handle->cda);
     if (handle->url) free(handle->url);
     if (handle->parsed_url) free_url_parse_result(handle->parsed_url);
+    if (handle->mutex) CloseHandle(handle->mutex);
+    if (handle->mutex2) CloseHandle(handle->mutex2);
+#if HAVE_WASAPI
+    if (handle->mutex3) CloseHandle(handle->mutex3);
+#endif
     free(handle);
 }
 
@@ -167,7 +182,7 @@ void ffmpeg_core_dump_library_version(int use_av_log, int av_log_level) {
     PRINTF("Other thirdparty libraries: \n");
     SDL_version sv;
     SDL_GetVersion(&sv);
-    PRINTF("SDL2          %3u.%3u.%3u\n", sv.major, sv.minor, sv.patch);
+    PRINTF("SDL           %3u.%3u.%3u\n", sv.major, sv.minor, sv.patch);
 }
 
 #define QUICK_PRINT_CONF(f, name) if (basic != f()) { \
@@ -234,6 +249,9 @@ int ffmpeg_core_open3(const wchar_t* url, MusicHandle** h, FfmpegCoreSettings* s
 #if HAVE_WASAPI
     if (handle->s->use_wasapi) {
         handle->is_use_wasapi = 1;
+    }
+    if (handle->s->enable_exclusive) {
+        handle->is_exclusive = 1;
     }
 #endif
     handle->is_cda = is_cda_file(u.c_str());
@@ -397,9 +415,13 @@ int ffmpeg_core_pause(MusicHandle* handle) {
 
 int64_t ffmpeg_core_get_cur_position(MusicHandle* handle) {
     if (!handle) return -1;
-    if (handle->only_part) return handle->pts - handle->part_start_pts;
-    // 忽略 SDL 可能长达 0.01s 的 buffer
-    return handle->pts;
+#if HAVE_WASAPI
+    int64_t pts = cal_true_pts(handle);
+#else
+    int64_t pts = handle->pts;
+#endif
+    if (handle->only_part) return pts - handle->part_start_pts;
+    return pts;
 }
 
 int ffmpeg_core_song_is_over(MusicHandle* handle) {
@@ -424,12 +446,12 @@ int64_t ffmpeg_core_info_get_song_length(MusicInfoHandle* handle) {
 
 int ffmpeg_core_get_channels(MusicHandle* handle) {
     if (!handle || !handle->decoder) return -1;
-    return handle->decoder->channels;
+    return GET_AV_CODEC_CHANNELS(handle->decoder);
 }
 
 int ffmpeg_core_info_get_channels(MusicInfoHandle* handle) {
     if (!handle || !handle->is) return -1;
-    return handle->is->codecpar->channels;
+    return GET_AV_CODEC_CHANNELS(handle->is->codecpar);
 }
 
 int ffmpeg_core_get_freq(MusicHandle* handle) {
@@ -444,13 +466,17 @@ int ffmpeg_core_info_get_freq(MusicInfoHandle* handle) {
 
 int ffmpeg_core_seek(MusicHandle* handle, int64_t time) {
     if (!handle) return FFMPEG_CORE_ERR_NULLPTR;
-    DWORD re = WaitForSingleObject(handle->mutex, INFINITE);
+    FILETIME st, et;
+    GetSystemTimePreciseAsFileTime(&st);
+    DWORD re = WaitForSingleObject(handle->mutex, handle->s->max_wait_time);
     if (re == WAIT_OBJECT_0) {
         handle->is_seek = 1;
         handle->seek_pos = time;
         if (handle->only_part) {
             handle->seek_pos += handle->part_start_pts;
         }
+    } else if (re == WAIT_TIMEOUT) {
+        return FFMPEG_CORE_ERR_TIMEOUT;
     } else {
         return FFMPEG_CORE_ERR_WAIT_MUTEX_FAILED;
     }
@@ -462,6 +488,8 @@ int ffmpeg_core_seek(MusicHandle* handle, int64_t time) {
     ReleaseMutex(handle->mutex);
     while (1) {
         if (!handle->is_seek) break;
+        GetSystemTimePreciseAsFileTime(&et);
+        if ((ft2ts(et) - ft2ts(st)) >= ((uint64_t)handle->s->max_wait_time * 10000)) return FFMPEG_CORE_ERR_WAIT_TIMEOUT;
         Sleep(10);
     }
     return handle->have_err ? handle->err : FFMPEG_CORE_ERR_OK;
@@ -558,9 +586,13 @@ wchar_t* ffmpeg_core_info_get_metadata(MusicInfoHandle* handle, const char* key)
 
 int send_reinit_filters(MusicHandle* handle) {
     if (!handle) return FFMPEG_CORE_ERR_NULLPTR;
-    DWORD re = WaitForSingleObject(handle->mutex, INFINITE);
+    FILETIME st, et;
+    GetSystemTimePreciseAsFileTime(&st);
+    DWORD re = WaitForSingleObject(handle->mutex, handle->s->max_wait_time);
     if (re == WAIT_OBJECT_0) {
         handle->need_reinit_filters = 1;
+    } else if (re == WAIT_TIMEOUT) {
+        return FFMPEG_CORE_ERR_TIMEOUT;
     } else {
         return FFMPEG_CORE_ERR_WAIT_MUTEX_FAILED;
     }
@@ -571,6 +603,8 @@ int send_reinit_filters(MusicHandle* handle) {
     handle->have_err = 0;
     ReleaseMutex(handle->mutex);
     while (handle->need_reinit_filters) {
+        GetSystemTimePreciseAsFileTime(&et);
+        if ((ft2ts(et) - ft2ts(st)) >= ((uint64_t)handle->s->max_wait_time * 10000)) return FFMPEG_CORE_ERR_WAIT_TIMEOUT;
         Sleep(10);
     }
     return handle->have_err ? handle->err : FFMPEG_CORE_ERR_OK;
@@ -585,6 +619,10 @@ FfmpegCoreSettings* ffmpeg_core_init_settings() {
     s->cache_length = 15;
     s->max_retry_count = 3;
     s->url_retry_interval = 5;
+    s->max_wait_time = 3000;
+#if HAVE_WASAPI
+    s->wasapi_min_buffer_time = 20;
+#endif
     return s;
 }
 
@@ -691,6 +729,10 @@ const wchar_t* ffmpeg_core_get_err_msg2(int err) {
             return L"Can not find suitable format for device.";
         case FFMPEG_CORE_ERR_FAILED_CREATE_EVENT:
             return L"Failed to create new event.";
+        case FFMPEG_CORE_ERR_TIMEOUT:
+            return L"Operation timeout.";
+        case FFMPEG_CORE_ERR_WAIT_TIMEOUT:
+            return L"The request is already send, but operation not completed.";
         default:
             return L"Unknown error.";
     }
@@ -796,21 +838,57 @@ int ffmpeg_core_is_wasapi_supported() {
 }
 
 int ffmpeg_core_settings_set_use_WASAPI(FfmpegCoreSettings* s, int enable) {
-    if (!s) return 1;
+    if (!s) return 0;
 #if HAVE_WASAPI
     s->use_wasapi = enable ? 1 : 0;
+    return 1;
+#else
     return 0;
+#endif
+}
+
+int ffmpeg_core_settings_set_enable_exclusive(FfmpegCoreSettings* s, int enable) {
+    if (!s) return 0;
+#if HAVE_WASAPI
+    s->enable_exclusive = enable ? 1 : 0;
+    return 1;
 #else
     return enable ? 1 : 0;
 #endif
 }
 
-int ffmpeg_core_settings_set_enable_exclusive(FfmpegCoreSettings* s, int enable) {
-    if (!s) return 1;
+int ffmpeg_core_settings_set_max_wait_time(FfmpegCoreSettings* s, int timeout) {
+    if (!s) return 0;
+    if (timeout < 100 || timeout > 30000) return 0;
+    s->max_wait_time = timeout;
+    return 1;
+}
+
+int ffmpeg_core_settings_set_wasapi_min_buffer_time(FfmpegCoreSettings* s, int time) {
 #if HAVE_WASAPI
-    s->enable_exclusive = enable ? 1 : 0;
-    return 0;
-#else
-    return enable ? 1 : 0;
+    if (!s) return 0;
+    if (time < 20 || time > 30000) return 0;
+    s->wasapi_min_buffer_time = time;
 #endif
+    return 0;
+}
+
+int ffmpeg_core_settings_set_reverb(FfmpegCoreSettings* s, int type, float mix, float time) {
+    if (!s || type < REVERB_TYPE_OFF || type > REVERB_TYPE_MAX) return 0;
+    if (type == REVERB_TYPE_OFF) {
+        s->reverb_type = REVERB_TYPE_OFF;
+        return 1;
+    }
+    if (mix <= 0 || time <= 0) return 0;
+    s->reverb_type = type;
+    s->reverb_delay = time;
+    s->reverb_mix = mix;
+    return 1;
+}
+
+int ffmpeg_core_set_reverb(MusicHandle* handle, int type, float mix, float time) {
+    if (!handle || !handle->s) return FFMPEG_CORE_ERR_NULLPTR;
+    int re = ffmpeg_core_settings_set_reverb(handle->s, type, mix, time);
+    if (!re) return AVERROR(EINVAL);
+    return send_reinit_filters(handle);
 }

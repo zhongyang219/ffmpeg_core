@@ -7,6 +7,8 @@ if (MSVC)
 endif()
 
 option(ENABLE_WASAPI "Enable WASAPI support" OFF)
+option(ENABLE_SDL3 "Force enable SDL3" OFF)
+option(ENABLE_SDL2 "Force enable SDL2" OFF)
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(GNUInstallDirs)
@@ -17,7 +19,18 @@ find_package(AVDEVICE 58 REQUIRED)
 find_package(AVUTIL 56 REQUIRED)
 find_package(AVFILTER 7 REQUIRED)
 find_package(SWRESAMPLE 4 REQUIRED)
-find_package(SDL2 REQUIRED)
+if (ENABLE_SDL2 AND ENABLE_SDL3)
+    message(FATAL_ERROR "SDL2 and SDL3 cannot be enabled at the same time")
+elseif(ENABLE_SDL3)
+    find_package(SDL3 REQUIRED)
+elseif(ENABLE_SDL2)
+    find_package(SDL2 REQUIRED)
+else()
+    find_package(SDL3)
+    if (NOT SDL3_FOUND)
+        find_package(SDL2 REQUIRED)
+    endif()
+endif()
 
 set(ENABLE_ICONV OFF CACHE BOOL "Libiconv is not needed.")
 add_subdirectory(utils)
@@ -51,9 +64,16 @@ src/equalizer_settings.h
 src/equalizer_settings.cpp
 src/equalizer.h
 src/equalizer.c
+src/ch_layout.h
+src/ch_layout.c
+src/reverb.h
+src/reverb.c
+src/linked_list/float_linked_list.h
+src/linked_list/float_linked_list.cpp
 "${CMAKE_CURRENT_BINARY_DIR}/ffmpeg_core.rc"
 "${CMAKE_CURRENT_BINARY_DIR}/ffmpeg_core_version.h"
 "${CMAKE_CURRENT_BINARY_DIR}/ffmpeg_core_config.h"
+.editorconfig
 )
 
 if (ENABLE_WASAPI)
@@ -61,8 +81,20 @@ if (ENABLE_WASAPI)
 endif()
 
 if (HAVE_WASAPI)
-    list(APPEND CORE_FILES src/wasapi.h src/wasapi.cpp)
+    list(APPEND CORE_FILES
+    src/wasapi.h
+    src/wasapi.cpp
+    src/linked_list/position_data_linked_list.h
+    src/linked_list/position_data_linked_list.cpp
+    src/position_data.h
+    src/position_data.c
+    )
 endif()
+
+if (SDL3_FOUND)
+    set(HAVE_SDL3 1)
+endif()
+
 configure_file("${CMAKE_CURRENT_SOURCE_DIR}/ffmpeg_core_config.h.in" "${CMAKE_CURRENT_BINARY_DIR}/ffmpeg_core_config.h")
 
 set_source_files_properties("${CMAKE_CURRENT_BINARY_DIR}/ffmpeg_core.rc" PROPERTIES GENERATED TRUE)
@@ -86,8 +118,18 @@ target_link_libraries(ffmpeg_core AVDEVICE::AVDEVICE)
 target_link_libraries(ffmpeg_core AVUTIL::AVUTIL)
 target_link_libraries(ffmpeg_core AVFILTER::AVFILTER)
 target_link_libraries(ffmpeg_core SWRESAMPLE::SWRESAMPLE)
-target_link_libraries(ffmpeg_core SDL2::Core)
-target_link_libraries(ffmpeg_core SDL2::Main)
+if (SDL2_FOUND)
+    target_link_libraries(ffmpeg_core SDL2::Core)
+    if (SDL2MAIN_FOUND)
+        target_link_libraries(ffmpeg_core SDL2::Main)
+    endif()
+endif()
+if (SDL3_FOUND)
+    target_link_libraries(ffmpeg_core SDL3::Core)
+    if (SDL3MAIN_FOUND)
+        target_link_libraries(ffmpeg_core SDL3::Main)
+    endif()
+endif()
 target_link_libraries(ffmpeg_core utils)
 
 if (NOT MSVC)

@@ -17,6 +17,12 @@ uint32_t frame_count;
 HANDLE thread;
 HRESULT err;
 HANDLE eve;
+/// 缓冲区长度（时间）
+int64_t frame_pts;
+/// 上一次padding（用来大致计算）
+uint32_t last_padding;
+/// 目标设备的名字
+wchar_t* device_name;
 unsigned char is_playing : 1;
 unsigned char have_err : 1;
 unsigned char stoping : 1;
@@ -48,7 +54,11 @@ int get_Device(const wchar_t* name, IMMDevice** result);
 */
 int open_WASAPI_device(MusicHandle* handle, const wchar_t* name);
 void close_WASAPI_device(MusicHandle* handle);
+#if NEW_CHANNEL_LAYOUT
+int32_t get_WASAPI_channel_mask(AVChannelLayout* channel_layout, int channels);
+#else
 int32_t get_WASAPI_channel_mask(int64_t channel_layout, int channels);
+#endif
 int format_is_pcm(enum AVSampleFormat fmt);
 int get_format_info(AVCodecContext* context, WAVEFORMATEXTENSIBLE* format);
 #define WASAPI_FORMAT_CHANGE_BITS 1
@@ -69,6 +79,14 @@ int init_wasapi_output(MusicHandle* handle, const char* device);
 DWORD WINAPI wasapi_loop2(LPVOID handle);
 DWORD WINAPI wasapi_loop(LPVOID handle);
 void play_WASAPI_device(MusicHandle* handle, int play);
+/**
+ * @brief 获取独占模式缓冲区大小
+ * @param min_device_preiord 最小设备时间（单位：100ns）
+ * @param min_buffer_time 最小缓冲区时间（单位：ms）
+ * @return 缓冲区长度（单位：100ns）
+*/
+REFERENCE_TIME get_WASAPI_buffer_time(REFERENCE_TIME min_device_preiord, int min_buffer_time);
+int reinit_wasapi_output(MusicHandle* handle);
 #if __cplusplus
 }
 #endif
