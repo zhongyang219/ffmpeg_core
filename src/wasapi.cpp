@@ -13,6 +13,7 @@
 #include "output.h"
 #include "wchar_util.h"
 #include "ch_layout.h"
+#include "mixing.h"
 
 #define GET_WIN_ERROR(errmsg, hr) std::string errmsg; \
 if (!err::get_winerror(errmsg, hr)) errmsg = "(null)"; \
@@ -490,6 +491,7 @@ int open_WASAPI_device(MusicHandle* handle, const wchar_t* name, bool allow_chan
         re = FFMPEG_CORE_ERR_FAILED_CREATE_THREAD;
         goto end;
     }
+    SetThreadPriority(handle->wasapi->thread, THREAD_PRIORITY_TIME_CRITICAL);
 end:
     comfree(device);
     if (target_fmt) {
@@ -652,6 +654,7 @@ int init_wasapi_output(MusicHandle* handle, const char* device) {
         re = FFMPEG_CORE_ERR_OOM;
         goto end;
     }
+    set_mixing_opts(handle);
     if ((re = swr_init(handle->swrac)) < 0) {
         goto end;
     }
@@ -746,6 +749,7 @@ DWORD WINAPI wasapi_loop(LPVOID handle) {
             uint8_t* data = nullptr;
             uint32_t count;
             DEAL_WASAPI_LOOP_ERROR(hr = w->client->GetCurrentPadding(&padding));
+            // 一次性最多塞10ms数据
             count = min(w->frame_count - padding, h->sdl_spec.freq / 100);
             DEAL_WASAPI_LOOP_ERROR(hr = w->render->GetBuffer(count, &data));
             SDL_callback((void*)handle, data, count * h->target_format_pbytes * h->sdl_spec.channels);
@@ -826,6 +830,7 @@ int reinit_wasapi_output(MusicHandle* handle) {
         re = FFMPEG_CORE_ERR_OOM;
         goto end;
     }
+    set_mixing_opts(handle);
     if ((re = swr_init(handle->swrac)) < 0) {
         goto end;
     }

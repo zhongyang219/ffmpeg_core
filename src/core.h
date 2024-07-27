@@ -23,7 +23,19 @@ extern "C" {
 #else
 #include "SDL2/SDL.h"
 #endif
+#if _WIN32
 #include <Windows.h>
+#define THREAD_HANDLE HANDLE
+#define MUTEX_HANDLE HANDLE
+#else
+#include <pthread.h>
+#include <time.h>
+#define THREAD_HANDLE pthread_t
+#define MUTEX_HANDLE pthread_mutex_t
+#define ReleaseMutex(mutex) pthread_mutex_unlock(&mutex)
+#define WAIT_OBJECT_0 0
+#define WAIT_TIMEOUT ETIMEDOUT
+#endif
 #include "c_linked_list.h"
 #include "urlparse.h"
 
@@ -38,7 +50,7 @@ extern "C" {
 
 #define FFT_SAMPLE 1024
 
-#if LIBAVCODEC_VERSION_MAJOR < 59 || LIBAVCODEC_VERSION_MINOR < 24 || LIBAVCODEC_VERSION_MICRO < 100
+#if LIBAVCODEC_VERSION_INT < AV_VERSION_INT(59, 24, 100)
 #define OLD_CHANNEL_LAYOUT 1
 #else
 #define NEW_CHANNEL_LAYOUT 1
@@ -94,13 +106,17 @@ struct SwrContext* swrac;
 /// 指定的SDL输出格式
 SDL_AudioSpec sdl_spec;
 /// 事件处理线程
-HANDLE thread;
+THREAD_HANDLE thread;
+#if _WIN32
 /// 事件处理线程线程ID
 DWORD thread_id;
+#endif
 /// 维护filters处理后缓冲区线程
-HANDLE filter_thread;
+THREAD_HANDLE filter_thread;
+#if _WIN32
 /// 维护filters处理后缓冲区线程线程ID
 DWORD filter_thread_id;
+#endif
 /// 音频缓冲区
 AVAudioFifo* buffer;
 /// 经过filters处理后的缓冲区
@@ -114,9 +130,9 @@ SDL_AudioDeviceID device_id;
 /// 错误信息（ffmpeg错误或Core错误
 int err;
 /// Mutex对象，作为线程锁（用于保护缓冲区和时间）
-HANDLE mutex;
+MUTEX_HANDLE mutex;
 /// 用来确保filter graph对象可用
-HANDLE mutex2;
+MUTEX_HANDLE mutex2;
 /// 缓冲区开始时间
 int64_t pts;
 /// 缓冲区结束时间
@@ -224,12 +240,6 @@ int max_retry_count;
 int url_retry_interval;
 /// 均衡器
 EqualizerChannels* equalizer_channels;
-#if HAVE_WASAPI
-/// 是否使用WASAPI
-unsigned char use_wasapi : 1;
-/// 是否启用独占模式
-unsigned char enable_exclusive : 1;
-#endif
 /// 最大等待时间（单位ms），seek等操作最长等待完成时间
 int max_wait_time;
 #if HAVE_WASAPI
@@ -242,10 +252,38 @@ float reverb_mix;
 float reverb_delay;
 /// 混响类型
 int reverb_type;
+/// 矩阵编码方式
+int matrix_encoding;
+/// 中置声道混流级别
+double center_mix_level;
+/// 环绕声道混流级别
+double surround_mix_level;
+/// LFE声道混流级别
+double lfe_mix_level;
+/// 最大等待缓冲区时间（超时会填充空白数据）（单位：ms）
+int max_wait_buffer_time;
+#if HAVE_WASAPI
+/// 是否使用WASAPI
+unsigned char use_wasapi : 1;
+/// 是否启用独占模式
+unsigned char enable_exclusive : 1;
+#endif
+/// 是否启用混流
+unsigned char enable_mixing : 1;
+/// 是否对双声道来源禁用混流
+unsigned char do_not_mix_stereo : 1;
+/// 是否启用标准化矩阵
+unsigned char normalize_matrix : 1;
+/// 是否启用音量保护
+unsigned char clip_protection : 1;
 } FfmpegCoreSettings;
 #if __cplusplus
 }
+#if _WIN32
 std::wstring get_metadata_str(AVDictionary* dict, const char* key, int flags);
+#else
+std::string get_metadata_str(AVDictionary* dict, const char* key, int flags);
+#endif
 inline enum AVRounding operator|(enum AVRounding a, enum AVRounding b) {
     return static_cast<enum AVRounding>(static_cast<int>(a) | static_cast<int>(b));
 }

@@ -8,6 +8,9 @@
 #else
 #define ADD_POSITION_DATA(len, have_data)
 #endif
+#include "mixing.h"
+
+#include "time_util.h"
 
 int init_output(MusicHandle* handle, const char* device) {
     if (!handle) return FFMPEG_CORE_ERR_NULLPTR;
@@ -52,6 +55,7 @@ int init_output(MusicHandle* handle, const char* device) {
         av_log(NULL, AV_LOG_FATAL, "Failed to allocate resample context.\n");
         return FFMPEG_CORE_ERR_OOM;
     }
+    set_mixing_opts(handle);
     if ((re = swr_init(handle->swrac)) < 0) {
         return re;
     }
@@ -111,7 +115,16 @@ void SDL_callback(void* userdata, uint8_t* stream, int len) {
         }
     }
 #endif
-    DWORD re = WaitForSingleObject(handle->mutex, 5);
+#if _WIN32
+    DWORD re = WaitForSingleObject(handle->mutex, handle->s->max_wait_buffer_time);
+#else
+    struct timespec ts;
+    size_t now = time_time_ns();
+    now += handle->s->max_wait_buffer_time * 1000000;
+    ts.tv_sec = now / 1000000000;
+    ts.tv_nsec = now % 1000000000;
+    int re = pthread_mutex_timedlock(&handle->mutex, &ts);
+#endif
     if (re != WAIT_OBJECT_0) {
         // 无法获取Mutex所有权，填充空白数据
         memset(stream, 0, len);

@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.0)
+cmake_minimum_required(VERSION 3.5)
 
 project(ffmpeg_core)
 
@@ -29,6 +29,12 @@ else()
     find_package(SDL3)
     if (NOT SDL3_FOUND)
         find_package(SDL2 REQUIRED)
+    endif()
+endif()
+if (NOT WIN32)
+    find_package(Threads)
+    if (NOT CMAKE_USE_PTHREADS_INIT)
+        message(FATAL_ERROR "Pthreads is required")
     endif()
 endif()
 
@@ -70,6 +76,8 @@ src/reverb.h
 src/reverb.c
 src/linked_list/float_linked_list.h
 src/linked_list/float_linked_list.cpp
+src/mixing.h
+src/mixing.c
 "${CMAKE_CURRENT_BINARY_DIR}/ffmpeg_core.rc"
 "${CMAKE_CURRENT_BINARY_DIR}/ffmpeg_core_version.h"
 "${CMAKE_CURRENT_BINARY_DIR}/ffmpeg_core_config.h"
@@ -93,6 +101,19 @@ endif()
 
 if (SDL3_FOUND)
     set(HAVE_SDL3 1)
+endif()
+
+if (WIN32)
+    check_symbol_exists(printf_s "stdio.h" HAVE_PRINTF_S)
+else()
+    set(TMP "${CMAKE_REQUIRED_DEFINITIONS}")
+    set(CMAKE_REQUIRED_DEFINITIONS -D_GNU_SOURCE)
+    check_symbol_exists(pthread_tryjoin_np "pthread.h" HAVE_PTHREAD_TRYJOIN_NP)
+    if (HAVE_PTHREAD_TRYJOIN_NP)
+        add_compile_definitions(_GNU_SOURCE)
+        set(HAVE_GNU_SOURCE ON)
+    endif()
+    set(CMAKE_REQUIRED_DEFINITIONS "${TMP}")
 endif()
 
 configure_file("${CMAKE_CURRENT_SOURCE_DIR}/ffmpeg_core_config.h.in" "${CMAKE_CURRENT_BINARY_DIR}/ffmpeg_core_config.h")
@@ -137,6 +158,10 @@ if (NOT MSVC)
     if (HAVE_WASAPI)
         target_link_libraries(ffmpeg_core ksuser)
     endif()
+endif()
+
+if (NOT WIN32)
+    target_link_libraries(ffmpeg_core Threads::Threads)
 endif()
 
 install(TARGETS ffmpeg_core)
